@@ -74,14 +74,16 @@ def exec_block(stmts, env, self_node, sim):
         elif kind == "call":
             _, target_id, func_name, arg_exprs, label = stmt
             args = [eval_expr(a, env) for a in arg_exprs]
-            sim.handle_call(self_node.id, target_id, func_name, args, label)
+            ran = sim.handle_call(self_node.id, target_id, func_name, args, label)
             # Only resync from self_node's committed state when the call was
-            # a genuine self-call (target_id == self_node.id). A nested call
-            # to a DIFFERENT node never touches self_node.dile, and self_node
-            # hasn't been write_env'd yet mid-function, so pulling it back in
-            # here for cross-node calls would silently discard whatever this
-            # function just computed locally (e.g. `dile = dile + amount`).
-            if target_id == self_node.id:
+            # a genuine self-call (target_id == self_node.id) AND that call
+            # actually executed a function body (ran == True). Labels like
+            # "off" never run a function -- they just mutate sim.behaviors --
+            # so there is nothing new to pull back in. Resyncing anyway would
+            # overwrite whatever this function just computed locally (e.g.
+            # `dile = dile - amount`) with the stale pre-call value, since
+            # self_node hasn't been write_env'd yet mid-function.
+            if target_id == self_node.id and ran:
                 env["dile"] = self_node.dile
                 for v in self_node.vars:
                     env[v] = self_node.vars[v]
@@ -107,15 +109,22 @@ class Simulator:
                 self.handle_call(node.id, target_id, func_name, args, label)
 
     def handle_call(self, source_id, target_id, func_name, args, label):
+        """Runs (or registers) a call. Returns True iff a function body was
+        actually executed on the target node (i.e. dile/vars may have
+        changed), False otherwise (e.g. label == "off", or a push that was
+        already registered)."""
         target = self.registry.get(target_id)
         if target is None:
             raise RuntimeError(f"No node with id {target_id}")
+
         key = (source_id, target_id, func_name)
         external = source_id == "EXTERNAL"
+        ran = False
 
         if label == "once":
             before = target.dile
             target.run_function(func_name, args)
+            ran = True
             after = target.dile
             self.log.append(f"  {source_id} -> {target.name}.{func_name}({args}) [once]")
             self.events.append({
@@ -127,6 +136,7 @@ class Simulator:
         elif label == "active":
             before = target.dile
             target.run_function(func_name, args)
+            ran = True
             after = target.dile
             self.log.append(f"  {source_id} -> {target.name}.{func_name}({args}) [active: fires once, holds]")
             self.behaviors[key] = {"label": "active", "args": args}
@@ -142,6 +152,7 @@ class Simulator:
             if not already:
                 before = target.dile
                 target.run_function(func_name, args)
+                ran = True
                 after = target.dile
                 self.log.append(f"  {source_id} -> {target.name}.{func_name}({args}) [push: registered]")
                 self.events.append({
@@ -160,8 +171,11 @@ class Simulator:
                     "func_name": func_name, "args": [], "label": "off", "external": k[0] == "EXTERNAL",
                     "effect": "cancelled",
                 })
+
         else:
             raise RuntimeError(f"Unknown label {label!r}")
+
+        return ran
 
     def inject(self, node_id, func_name, args, label="once"):
         self.handle_call("EXTERNAL", node_id, func_name, args, label)
@@ -173,7 +187,6 @@ class Simulator:
                 continue
             best_source = max(entries, key=lambda e: self.registry[e[0]].base_dile)[0]
             wins[best_source] = wins.get(best_source, 0) + 1
-
         ranked = sorted(wins.items(), key=lambda kv: -kv[1])
         bonus = {}
         for i, (source_id, _) in enumerate(ranked):
@@ -206,7 +219,6 @@ class Simulator:
         return {target_id for (_, target_id, _) in self.behaviors}
 
     def tick(self):
-        self.tick_count += 1
         self.log.append(f"[tick {self.tick_count}]")
 
         winners = self.resolve_contentions()
@@ -243,6 +255,12 @@ class Simulator:
     def run(self, ticks, schedule=None):
         schedule = schedule or {}
         for t in range(1, ticks + 1):
+            # Set tick_count for this iteration BEFORE any scheduled
+            # injections fire, so events logged by inject() carry the tick
+            # they were actually scheduled for instead of the previous
+            # tick's number (tick_count used to only advance inside
+            # tick(), which runs after injections in the same iteration).
+            self.tick_count = t
             if t in schedule:
                 for node_id, func_name, args, label in schedule[t]:
                     self.inject(node_id, func_name, args, label)
