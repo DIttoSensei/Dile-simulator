@@ -335,7 +335,7 @@ def generate_svg_graph(sim, path="run_graph.html", title="Simulation Output"):
 <html>
 <head>
 <meta charset="utf-8">
-<title>BrainDSL run graph</title>
+<title>Dile run graph</title>
 <style>
   body {{
     margin: 0;

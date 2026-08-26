@@ -15,20 +15,42 @@ def load_simulator(folder):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="rd")
-    sub = ap.add_subparsers(dest="command", required=True)
+    ap = argparse.ArgumentParser(
+        prog="dile", 
+        description="Dile Simulator - Created by Corvus.Q"
+    )
+    sub = ap.add_subparsers(dest="command", required=False)
 
-    run_cmd = sub.add_parser("run", help="Run a simulation over a folder of .rd nodes")
+    run_cmd = sub.add_parser("run", help="Run a simulation over a folder or a .sm file")
+    
+    # Adding help="..." prevents blank entries in `dile run --help`
     run_cmd.add_argument("folder", nargs="?", default="nodes", help="Folder containing .rd node files (default: nodes)")
-    run_cmd.add_argument("--ticks", type=int, default=15)
+    run_cmd.add_argument("--ticks", type=int, default=15, help="Number of ticks to run (default: 15)")
     run_cmd.add_argument(
         "--inject", action="append", default=[],
-        help="tick:@id.func(args):label  e.g. 1:@1.receive_input(60):once"
+        help="Inject call: tick:@id.func(args):label"
     )
-    run_cmd.add_argument("--graph", action="store_true", help="Generate and open a graph of the run")
+    run_cmd.add_argument("--graph", action="store_true", help="Generate and open an SVG graph")
     run_cmd.add_argument("--sim", help="Path to a .sm simulation file (overrides --ticks/--inject/--graph)")
 
     args = ap.parse_args()
+
+    # If no subcommand was provided (e.g. user double-clicked dile.exe or typed 'dile')
+    if args.command is None:
+        print("==================================================")
+        print(" Dile Simulator v1.0.1")
+        print(" Created by Corvus.Q")
+        print(" GitHub: https://github.com/DIttoSensei/Dile-simulator")
+        print("==================================================")
+        print("\nUsage:")
+        print("  dile run [folder]         Run node simulation (default: nodes)")
+        print("  dile run --sim <file.sm>  Run a .sm simulation file")
+        print("  dile run --help               Show all options and flags")
+        
+        # Pause execution if launched by double-clicking in File Explorer
+        input("\nPress Enter to exit...")
+        return
+
 
     if args.command == "run":
         sim = load_simulator(args.folder)
