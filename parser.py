@@ -1,4 +1,5 @@
 import re
+
 from tokenizer import tokenize
 
 
@@ -51,6 +52,15 @@ class ExprParser:
             e = self.parse()
             self.next()
             return e
+        if kind == "NODEID":
+            # @<id>.<attr> -- read another node's dile or a state var
+            dot_kind, dot_val = self.next()
+            if dot_kind != "DOT":
+                raise SyntaxError(f"Expected '.' after node reference {val!r}")
+            name_kind, name_val = self.next()
+            if name_kind != "NAME":
+                raise SyntaxError(f"Expected attribute name after '{val}.'")
+            return ("nodeattr", val, name_val)
         if kind == "NAME":
             return ("var", val)
         raise SyntaxError(f"Unexpected token in expression: {val!r}")
@@ -77,7 +87,7 @@ class FunctionDef:
 
 class NodeDef:
     def __init__(self, node_id, name):
-        self.tick_calls = []     # top-level call statements: run every tick, before decay
+        self.tick_calls = []  # top-level call statements: run every tick, before decay
         self.id = node_id
         self.name = name
         self.base_dile = 0
@@ -89,35 +99,80 @@ class NodeDef:
         return f"<node {self.id} {self.name} dile={self.base_dile} state={list(self.state)} fns={list(self.functions)}>"
 
 
-CALL_RE = re.compile(r"^(@\d+)\.([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*->\s*([A-Za-z_][A-Za-z0-9_]*)$")
+# call target . func ( args ) -> label [optional {tick:N} or {tick:next}]
+CALL_RE = re.compile(
+    r"^(@\d+)\.([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*->\s*([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s*\{\s*tick\s*:\s*(\d+|next)\s*\})?$"
+)
 DECAY_RE = re.compile(r"^@bah_decay\(\)\s*->\s*tik$")
 FUNC_HEADER_RE = re.compile(r"^@bah\s+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)\s*:$")
 IF_HEADER_RE = re.compile(r"^IF\s*\{(.*)\}\s*:$")
+ELIF_HEADER_RE = re.compile(r"^ELIF\s*\{(.*)\}\s*:$")
+ELSE_HEADER_RE = re.compile(r"^ELSE\s*:$")
 NODE_HEADER_RE = re.compile(r"^(@\d+)\s+node\s+([A-Za-z_][A-Za-z0-9_]*)\s*:$")
 STATE_HEADER_RE = re.compile(r"^state:dile\s*=\s*(\d+(?:\.\d+)?)$")
 VAR_LINE_RE = re.compile(r"^var\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$")
 
 
+def _parse_call_stmt(m):
+    target_id, func_name, args_text, label, tick_text = m.groups()
+    args = [parse_expr(a) for a in split_args(args_text)]
+    if tick_text is None:
+        tick_num = None
+    elif tick_text == "next":
+        tick_num = "next"
+    else:
+        tick_num = int(tick_text)
+    return ("call", target_id, func_name, args, label, tick_num)
+
+
 def parse_statements(block_nodes):
     stmts = []
-    for node in block_nodes:
+    i = 0
+    n = len(block_nodes)
+    while i < n:
+        node = block_nodes[i]
         text = node["header"]
 
         m = IF_HEADER_RE.match(text)
         if m:
-            cond = parse_expr(m.group(1))
-            body = parse_statements(node["children"])
-            stmts.append(("if", cond, body))
+            branches = [(parse_expr(m.group(1)), parse_statements(node["children"]))]
+            i += 1
+            else_body = None
+            while i < n:
+                nxt_text = block_nodes[i]["header"]
+                em = ELIF_HEADER_RE.match(nxt_text)
+                if em:
+                    branches.append((parse_expr(em.group(1)), parse_statements(block_nodes[i]["children"])))
+                    i += 1
+                    continue
+                sm = ELSE_HEADER_RE.match(nxt_text)
+                if sm:
+                    else_body = parse_statements(block_nodes[i]["children"])
+                    i += 1
+                break
+            stmts.append(("if_chain", branches, else_body))
+            continue
+
+        if ELIF_HEADER_RE.match(text) or ELSE_HEADER_RE.match(text):
+            raise SyntaxError(f"{text!r} has no preceding IF")
+
+        m = VAR_LINE_RE.match(text)
+        if m:
+            var_name, expr_text = m.groups()
+            expr = parse_expr(expr_text.strip())
+            stmts.append(("local_var", var_name, expr))
+            i += 1
             continue
 
         m = CALL_RE.match(text)
         if m:
-            target_id, func_name, args_text, label = m.groups()
-            args = [parse_expr(a) for a in split_args(args_text)]
-            stmts.append(("call", target_id, func_name, args, label))
+            stmts.append(_parse_call_stmt(m))
+            i += 1
             continue
 
         if DECAY_RE.match(text):
+            i += 1
             continue
 
         if "=" in text:
@@ -125,6 +180,7 @@ def parse_statements(block_nodes):
             var = var.strip()
             expr = parse_expr(expr_text.strip())
             stmts.append(("assign", var, expr))
+            i += 1
             continue
 
         raise SyntaxError(f"Unrecognized statement: {text!r}")
@@ -174,9 +230,7 @@ def parse_node(tree):
 
         m = CALL_RE.match(text)
         if m:
-            target_id, func_name, args_text, label = m.groups()
-            args = [parse_expr(a) for a in split_args(args_text)]
-            nd.tick_calls.append(("call", target_id, func_name, args, label))
+            nd.tick_calls.append(_parse_call_stmt(m))
             continue
 
         raise SyntaxError(f"Unexpected line in node body: {text!r}")
