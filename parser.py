@@ -197,6 +197,14 @@ def parse_function(fn_node):
     body = parse_statements(fn_node["children"])
     return FunctionDef(name, params, body)
 
+def _contains_nodeattr(expr):
+    if expr[0] == "nodeattr":
+        return True
+    if expr[0] == "binop":
+        _, _, l, r = expr
+        return _contains_nodeattr(l) or _contains_nodeattr(r)
+    return False
+
 
 def parse_node(tree):
     m = NODE_HEADER_RE.match(tree["header"])
@@ -216,7 +224,14 @@ def parse_node(tree):
                 if not vm:
                     raise SyntaxError(f"Bad var line: {var_line['header']!r}")
                 var_name, val_text = vm.groups()
-                nd.state[var_name] = parse_expr(val_text.strip())
+                val_expr = parse_expr(val_text.strip())
+                if _contains_nodeattr(val_expr):
+                    raise SyntaxError(
+                        f"state: var {var_name!r} cannot reference another node "
+                        f"(found @id.attr) — other nodes may not exist yet at this "
+                        f"point. Move this logic into a @bah function instead."
+                    )
+                nd.state[var_name] = val_expr
             continue
 
         if FUNC_HEADER_RE.match(text):

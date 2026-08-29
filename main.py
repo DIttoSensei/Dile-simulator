@@ -38,7 +38,7 @@ def main():
     # If no subcommand was provided (e.g. user double-clicked dile.exe or typed 'dile')
     if args.command is None:
         print("==================================================")
-        print(" Dile Simulator v1.0.5")
+        print(" Dile Simulator v1.0.6")
         print(" Created by Corvus.Q")
         print(" GitHub: https://github.com/DIttoSensei/Dile-simulator")
         print("==================================================")

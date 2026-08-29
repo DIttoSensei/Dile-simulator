@@ -121,40 +121,22 @@ def exec_block(stmts, env, self_node, sim):
         elif kind == "call":
             _, target_id, func_name, arg_exprs, label, tick_num = stmt
 
-            if tick_num is not None and tick_num != "next" and sim.tick_count != tick_num:
-                continue  # scheduled for a different absolute tick -- skip this one
-
             args = [eval_expr(a, env, sim) for a in arg_exprs]
-
-            # Commit this node's progress BEFORE handing control to another
-            # node's function. Previously this only happened once, after the
-            # whole outer function returned -- so if A called B and B called
-            # back into A before A's first call had returned, B would read
-            # A's stale pre-call state (or vice versa in a mutual chain),
-            # and a threshold IF-check comparing against that frozen value
-            # could never see it cross, causing unbounded recursion. Writing
-            # here means every call in a chain always sees the real,
-            # up-to-date state of whoever it's calling.
             self_node.write_env(env)
 
             if tick_num == "next":
-                # Don't run this call now -- queue it to fire at the START
-                # of the NEXT tick, outside of this call stack entirely.
-                # This is what actually stops a chain like A -> B -> A from
-                # happening instantly, all within one tick: each hop now
-                # waits for its own tick instead of running inside the call
-                # that triggered it.
                 sim.defer_call(self_node.id, target_id, func_name, args, label)
+                continue
+
+            if tick_num is not None and tick_num != sim.tick_count:
+                # Scheduled for a specific tick that hasn't happened yet (or
+                # already has) -- queue it instead of dropping it. Args are
+                # frozen now, at the moment this line actually ran.
+                sim.defer_call_at(tick_num, self_node.id, target_id, func_name, args, label)
                 continue
 
             ran = sim.handle_call(self_node.id, target_id, func_name, args, label)
 
-            # Only resync from self_node's committed state when the call was
-            # a genuine self-call AND it actually ran a function body. Labels
-            # like "off" never run a function -- they just mutate
-            # sim.behaviors -- so there's nothing new to pull back in, and
-            # resyncing anyway would overwrite whatever this function just
-            # computed locally with a stale value.
             if target_id == self_node.id and ran:
                 env["dile"] = self_node.dile
                 for v in self_node.vars:
@@ -238,15 +220,11 @@ class Simulator:
             already = key in self.behaviors
             self.behaviors[key] = {"label": "push", "args": args}
             if not already:
-                before = target.dile
-                target.run_function(func_name, args)
-                ran = True
-                after = target.dile
                 self.log.append(f"  {source_id} -> {target.name}.{func_name}({args}) [push: registered]")
                 self.events.append({
                     "tick": self.tick_count, "source_id": source_id, "target_id": target_id,
                     "func_name": func_name, "args": args, "label": "push", "external": external,
-                    "effect": f"dile {before} -> {after} (registered)",
+                    "effect": "registered (will fire starting this tick's refire pass)",
                 })
 
         elif label == "off":
@@ -268,12 +246,18 @@ class Simulator:
     def inject(self, node_id, func_name, args, label="once"):
         self.handle_call("EXTERNAL", node_id, func_name, args, label)
 
-    def defer_call(self, source_id, target_id, func_name, args, label):
-        """Queue a call to fire at the start of the NEXT tick instead of
-        running it right now. Args are captured now (frozen at the moment
-        the call was made), not re-read when it actually fires later."""
-        fire_at = self.tick_count + 1
+
+    def defer_call_at(self, fire_at, source_id, target_id, func_name, args, label):
+        """Queue a call to fire at an explicit absolute tick. If that tick has
+        already passed by the time this is scheduled, fire it on the very next
+        tick instead of silently losing it."""
+        if fire_at <= self.tick_count:
+            fire_at = self.tick_count + 1
         self.deferred.setdefault(fire_at, []).append((source_id, target_id, func_name, args, label))
+
+
+    def defer_call(self, source_id, target_id, func_name, args, label):
+        self.defer_call_at(self.tick_count + 1, source_id, target_id, func_name, args, label)
 
     def run_deferred_calls(self):
         pending = self.deferred.pop(self.tick_count, [])
